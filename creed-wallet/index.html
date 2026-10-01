@@ -1,0 +1,537 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CREED Wallet</title>
+<style>
+  :root {
+    --bg: #f5f6fa; --card: #ffffff; --ink: #1d2433; --muted: #667085; --line: #e3e6ee;
+    --accent: #3b5bdb; --accent-ink: #ffffff; --good: #2b8a3e; --bad: #c92a2a; --warn: #e67700;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #12151c; --card: #1b2030; --ink: #e8ebf3; --muted: #9aa3b5; --line: #2b3247;
+      --accent: #748ffc; --accent-ink: #0b0f1a; --good: #69db7c; --bad: #ff8787; --warn: #ffc078;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 16px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; background: var(--bg); color: var(--ink); }
+  header { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 16px; background: var(--card); border-bottom: 1px solid var(--line); }
+  header h1 { font-size: 1.1rem; margin: 0; }
+  main { max-width: 960px; margin: 0 auto; padding: 16px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 16px; margin-bottom: 16px; }
+  .card h2 { margin: 0 0 12px; font-size: 1.05rem; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  .grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); }
+  label { display: block; font-size: .85rem; color: var(--muted); margin: 8px 0 4px; }
+  input, select { font: inherit; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--ink); width: 100%; }
+  input[type=checkbox] { width: auto; }
+  button { font: inherit; padding: 8px 14px; border-radius: 8px; border: 1px solid var(--line); background: var(--card); color: var(--ink); cursor: pointer; }
+  button.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+  button.danger { color: var(--bad); }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  .tabs { display: flex; gap: 4px; flex-wrap: wrap; margin-bottom: 16px; }
+  .tabs button[aria-selected=true] { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+  table { width: 100%; border-collapse: collapse; font-size: .92rem; }
+  th, td { text-align: left; padding: 8px 6px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; }
+  .table-wrap { overflow-x: auto; }
+  .muted { color: var(--muted); font-size: .88rem; }
+  .pos { color: var(--good); font-weight: 600; }
+  .neg { color: var(--bad); font-weight: 600; }
+  .balance { font-size: 2.6rem; font-weight: 700; letter-spacing: -.02em; }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .8rem; word-break: break-all; }
+  .bar { height: 10px; background: var(--line); border-radius: 99px; overflow: hidden; }
+  .bar > div { height: 100%; background: var(--accent); }
+  .bar.over > div { background: var(--bad); }
+  .pick { display: grid; gap: 8px; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); }
+  .pick label { display: flex; gap: 8px; align-items: center; margin: 0; padding: 8px; border: 1px solid var(--line); border-radius: 8px; color: var(--ink); font-size: .95rem; }
+  .toast { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); background: var(--ink); color: var(--bg); padding: 10px 16px; border-radius: 8px; max-width: calc(100% - 32px); }
+  .center { max-width: 420px; margin: 40px auto; }
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+<header>
+  <h1 id="title">CREED Wallet</h1>
+  <div class="row"><span id="who" class="muted"></span><button id="logout" class="hidden">Log out</button></div>
+</header>
+<main id="app"></main>
+<div id="toast" class="toast hidden" role="status"></div>
+
+<script>
+/* CREED Wallet: a classroom points wallet with a hash-chained ledger.
+   All data lives in this browser's localStorage. Use Settings → Export to back it up. */
+const STORE_KEY = 'creed-wallet-v1';
+const BANK = 'BANK', STORE = 'STORE';
+let state = null;
+let session = null; // {role:'teacher'} | {role:'student', id}
+let tab = null;
+
+// ---------- utilities ----------
+const $ = (sel, root = document) => root.querySelector(sel);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const uid = () => crypto.getRandomValues(new Uint32Array(2)).join('').slice(0, 12);
+const fmt = n => `${n.toLocaleString()} ${state?.settings.unit || 'CREED'}`;
+const when = ts => new Date(ts).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+
+async function sha256(text) {
+  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
+  return [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, '0')).join('');
+}
+const hashPin = (pin, salt) => sha256(`${salt}:${pin}`);
+
+function toast(msg) {
+  const t = $('#toast'); t.textContent = msg; t.classList.remove('hidden');
+  clearTimeout(toast.timer); toast.timer = setTimeout(() => t.classList.add('hidden'), 2600);
+}
+
+function load() {
+  try { state = JSON.parse(localStorage.getItem(STORE_KEY)); } catch { state = null; }
+}
+function save() {
+  try { localStorage.setItem(STORE_KEY, JSON.stringify(state)); }
+  catch { toast('Could not save. Export a backup from Settings.'); }
+}
+
+function newWalletId() {
+  const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  const r = crypto.getRandomValues(new Uint8Array(6));
+  return 'CRD-' + [...r].map(x => alphabet[x % alphabet.length]).join('');
+}
+
+// ---------- ledger ----------
+// Each entry stores the hash of the one before it, like a tiny blockchain.
+const entryBody = e => JSON.stringify([e.n, e.ts, e.type, e.from, e.to, e.amount, e.memo, e.prev]);
+
+let chainLock = Promise.resolve();
+function addTx(type, from, to, amount, memo) {
+  chainLock = chainLock.then(async () => {
+    const last = state.ledger[state.ledger.length - 1];
+    const e = { n: state.ledger.length, ts: Date.now(), type, from, to, amount, memo: memo || '', prev: last ? last.hash : '0'.repeat(64) };
+    e.hash = await sha256(entryBody(e));
+    state.ledger.push(e);
+    save();
+  });
+  return chainLock;
+}
+
+async function verifyChain() {
+  let prev = '0'.repeat(64);
+  for (const e of state.ledger) {
+    if (e.prev !== prev || e.hash !== await sha256(entryBody(e))) return e.n;
+    prev = e.hash;
+  }
+  return -1;
+}
+
+function balanceOf(walletId) {
+  let b = 0;
+  for (const e of state.ledger) {
+    if (e.to === walletId) b += e.amount;
+    if (e.from === walletId) b -= e.amount;
+  }
+  return b;
+}
+
+function startOfWeek() {
+  const d = new Date(); d.setHours(0, 0, 0, 0);
+  d.setDate(d.getDate() - ((d.getDay() + 6) % 7)); // Monday
+  return d.getTime();
+}
+function spentThisWeek(walletId) {
+  const since = startOfWeek();
+  return state.ledger.filter(e => e.from === walletId && e.ts >= since && (e.type === 'purchase' || e.type === 'transfer'))
+    .reduce((s, e) => s + e.amount, 0);
+}
+
+const studentByWallet = w => state.students.find(s => s.walletId === w);
+function walletLabel(w) {
+  if (w === BANK) return 'Teacher';
+  if (w === STORE) return 'Class Store';
+  const s = studentByWallet(w);
+  return s ? s.name : w;
+}
+
+// ---------- screens ----------
+function render() {
+  $('#title').textContent = state ? `${state.className} · CREED Wallet` : 'CREED Wallet';
+  $('#logout').classList.toggle('hidden', !session);
+  $('#who').textContent = !session ? '' : session.role === 'teacher' ? 'Teacher' : getStudent().name;
+  if (!state) return renderSetup();
+  if (!session) return renderLogin();
+  if (session.role === 'teacher') return renderTeacher();
+  return renderStudent();
+}
+
+function renderSetup() {
+  $('#app').innerHTML = `
+  <div class="card center">
+    <h2>Set up your classroom</h2>
+    <p class="muted">Everything stays on this device. No accounts, emails or real cryptocurrency are involved.</p>
+    <form id="setup">
+      <label>Class name</label><input name="cls" required placeholder="Room 12">
+      <label>Point name</label><input name="unit" value="CREED" required>
+      <label>Teacher PIN (4–8 digits)</label><input name="pin" inputmode="numeric" pattern="\\d{4,8}" required type="password">
+      <div class="row" style="margin-top:12px"><button class="primary">Create classroom</button></div>
+    </form>
+    <hr style="border:0;border-top:1px solid var(--line);margin:16px 0">
+    <label>Or restore from a backup file</label><input type="file" id="restore" accept="application/json">
+  </div>`;
+  $('#setup').onsubmit = async ev => {
+    ev.preventDefault();
+    const f = new FormData(ev.target), salt = uid();
+    state = {
+      version: 1, className: f.get('cls').trim(), salt,
+      teacherPin: await hashPin(f.get('pin'), salt),
+      settings: { unit: f.get('unit').trim() || 'CREED', allowTransfers: true, defaultWeeklyLimit: 0 },
+      students: [], items: [], ledger: []
+    };
+    await addTx('genesis', BANK, BANK, 0, 'Classroom created');
+    session = { role: 'teacher' }; tab = 'students';
+    render();
+  };
+  $('#restore').onchange = restoreFromFile;
+}
+
+function renderLogin() {
+  const opts = state.students.slice().sort((a, b) => a.name.localeCompare(b.name))
+    .map(s => `<option value="${s.id}">${esc(s.name)}</option>`).join('');
+  $('#app').innerHTML = `
+  <div class="card center">
+    <h2>Open a wallet</h2>
+    <form id="login">
+      <label>Who are you?</label>
+      <select name="who"><option value="teacher">Teacher</option>${opts}</select>
+      <label>PIN</label><input name="pin" type="password" inputmode="numeric" autocomplete="off" required>
+      <div class="row" style="margin-top:12px"><button class="primary">Open</button></div>
+    </form>
+  </div>`;
+  if (state.students.length) $('#login select').value = state.students[0].id;
+  $('#login').onsubmit = async ev => {
+    ev.preventDefault();
+    const f = new FormData(ev.target), who = f.get('who'), h = await hashPin(f.get('pin'), state.salt);
+    if (who === 'teacher' && h === state.teacherPin) { session = { role: 'teacher' }; tab = 'students'; }
+    else if (who !== 'teacher' && state.students.find(s => s.id === who)?.pin === h) { session = { role: 'student', id: who }; tab = 'wallet'; }
+    else return toast('Wrong PIN');
+    render();
+  };
+}
+
+function tabs(list) {
+  return `<div class="tabs" role="tablist">${list.map(([k, l]) =>
+    `<button role="tab" data-tab="${k}" aria-selected="${tab === k}">${l}</button>`).join('')}</div>`;
+}
+function wireTabs() {
+  document.querySelectorAll('[data-tab]').forEach(b => b.onclick = () => { tab = b.dataset.tab; render(); });
+}
+
+function historyTable(entries, perspective) {
+  if (!entries.length) return '<p class="muted">No transactions yet.</p>';
+  return `<div class="table-wrap"><table><thead><tr><th>When</th><th>What</th><th>From → To</th><th>Amount</th></tr></thead><tbody>
+  ${entries.slice().reverse().map(e => {
+    const sign = perspective ? (e.to === perspective ? 'pos' : 'neg') : '';
+    const amt = perspective ? (e.to === perspective ? '+' : '−') + e.amount : e.amount;
+    return `<tr><td>${when(e.ts)}</td><td>${esc(e.type)}${e.memo ? `<div class="muted">${esc(e.memo)}</div>` : ''}</td>
+      <td>${esc(walletLabel(e.from))} → ${esc(walletLabel(e.to))}</td><td class="${sign}">${amt}</td></tr>`;
+  }).join('')}</tbody></table></div>`;
+}
+
+// ---------- teacher ----------
+function renderTeacher() {
+  const body = {
+    students: teacherStudents, award: teacherAward, store: teacherStore, ledger: teacherLedger, settings: teacherSettings
+  }[tab] || teacherStudents;
+  $('#app').innerHTML = tabs([['students', 'Students'], ['award', 'Award / Deduct'], ['store', 'Class Store'], ['ledger', 'Ledger'], ['settings', 'Settings']]) + body();
+  wireTabs();
+  wireTeacher();
+}
+
+function teacherStudents() {
+  const rows = state.students.slice().sort((a, b) => a.name.localeCompare(b.name)).map(s => `
+    <tr><td>${esc(s.name)}<div class="mono muted">${s.walletId}</div></td><td>${fmt(balanceOf(s.walletId))}</td>
+    <td>${spentThisWeek(s.walletId)}${s.weeklyLimit ? ` / ${s.weeklyLimit}` : ''}</td>
+    <td class="row"><button data-reset="${s.id}">Reset PIN</button><button class="danger" data-remove="${s.id}">Remove</button></td></tr>`).join('');
+  return `
+  <div class="card"><h2>Add students</h2>
+    <form id="addStudent" class="row">
+      <input name="name" placeholder="Student name or nickname" required style="flex:2;min-width:180px">
+      <input name="pin" placeholder="PIN (4–8 digits)" inputmode="numeric" pattern="\\d{4,8}" required style="flex:1;min-width:120px">
+      <button class="primary">Add</button>
+    </form>
+    <p class="muted">Tip: use first names or nicknames only. Students log in with the PIN you give them.</p>
+  </div>
+  <div class="card"><h2>Class (${state.students.length})</h2>
+    ${state.students.length ? `<div class="table-wrap"><table><thead><tr><th>Student</th><th>Balance</th><th>Spent this week</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>` : '<p class="muted">No students yet.</p>'}
+  </div>`;
+}
+
+function teacherAward() {
+  const pick = state.students.slice().sort((a, b) => a.name.localeCompare(b.name))
+    .map(s => `<label><input type="checkbox" name="s" value="${s.walletId}"> ${esc(s.name)}</label>`).join('');
+  return `
+  <div class="card"><h2>Award or deduct ${esc(state.settings.unit)}</h2>
+    <form id="award">
+      <div class="row"><button type="button" id="selAll">Select all</button><button type="button" id="selNone">Clear</button></div>
+      <div class="pick" style="margin-top:8px">${pick || '<p class="muted">Add students first.</p>'}</div>
+      <div class="grid" style="margin-top:8px">
+        <div><label>Amount</label><input name="amount" type="number" min="1" step="1" required></div>
+        <div><label>Reason</label><input name="memo" placeholder="e.g. Helped a classmate" required></div>
+      </div>
+      <div class="row" style="margin-top:12px">
+        <button class="primary" name="mode" value="award">Award</button>
+        <button class="danger" name="mode" value="deduct">Deduct</button>
+      </div>
+    </form>
+  </div>`;
+}
+
+function teacherStore() {
+  const rows = state.items.map(i => `<tr><td>${esc(i.name)}</td><td>${fmt(i.price)}</td><td>${i.stock < 0 ? '∞' : i.stock}</td>
+    <td><button class="danger" data-delitem="${i.id}">Remove</button></td></tr>`).join('');
+  return `
+  <div class="card"><h2>Add a reward</h2>
+    <form id="addItem" class="grid">
+      <div><label>Reward</label><input name="name" required placeholder="Homework pass"></div>
+      <div><label>Price</label><input name="price" type="number" min="1" step="1" required></div>
+      <div><label>Stock (blank = unlimited)</label><input name="stock" type="number" min="0" step="1"></div>
+      <div style="align-self:end"><button class="primary">Add reward</button></div>
+    </form>
+  </div>
+  <div class="card"><h2>Rewards</h2>
+    ${state.items.length ? `<div class="table-wrap"><table><thead><tr><th>Reward</th><th>Price</th><th>Stock</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>` : '<p class="muted">The store is empty.</p>'}
+  </div>`;
+}
+
+function teacherLedger() {
+  return `
+  <div class="card"><h2>Class ledger</h2>
+    <div class="row"><button id="verify">Verify ledger</button><span id="verifyOut" class="muted"></span></div>
+    <p class="muted">Every transaction stores a fingerprint (hash) of the one before it. If anyone edits an old entry, verification fails, the same idea that keeps a blockchain honest.</p>
+    ${historyTable(state.ledger.filter(e => e.type !== 'genesis'))}
+  </div>`;
+}
+
+function teacherSettings() {
+  return `
+  <div class="card"><h2>Rules</h2>
+    <form id="settings">
+      <label><input type="checkbox" name="allowTransfers" ${state.settings.allowTransfers ? 'checked' : ''}> Students may send ${esc(state.settings.unit)} to classmates</label>
+      <label>Default weekly spending limit for new students (0 = none)</label>
+      <input name="limit" type="number" min="0" step="1" value="${state.settings.defaultWeeklyLimit}">
+      <label><input type="checkbox" name="applyAll"> Also apply this limit to every current student</label>
+      <div class="row" style="margin-top:12px"><button class="primary">Save rules</button></div>
+    </form>
+  </div>
+  <div class="card"><h2>Backup</h2>
+    <p class="muted">Data lives only in this browser. Export a backup regularly, and before clearing browser data.</p>
+    <div class="row"><button id="export">Export backup</button><label class="row" style="margin:0">Restore: <input type="file" id="restore" accept="application/json" style="width:auto"></label></div>
+  </div>
+  <div class="card"><h2>Danger zone</h2><button class="danger" id="wipe">Erase this classroom</button></div>`;
+}
+
+function wireTeacher() {
+  const on = (sel, ev, fn) => { const el = $(sel); if (el) el[ev] = fn; };
+
+  on('#addStudent', 'onsubmit', async ev => {
+    ev.preventDefault();
+    const f = new FormData(ev.target), name = f.get('name').trim();
+    if (state.students.some(s => s.name.toLowerCase() === name.toLowerCase())) return toast('That name is already used');
+    state.students.push({ id: uid(), name, walletId: newWalletId(), pin: await hashPin(f.get('pin'), state.salt), weeklyLimit: state.settings.defaultWeeklyLimit, goals: [] });
+    save(); toast(`Wallet created for ${name}`); render();
+  });
+  document.querySelectorAll('[data-reset]').forEach(b => b.onclick = async () => {
+    const s = state.students.find(x => x.id === b.dataset.reset);
+    const pin = prompt(`New PIN for ${s.name} (4–8 digits)`);
+    if (!pin || !/^\d{4,8}$/.test(pin)) return pin && toast('PIN must be 4–8 digits');
+    s.pin = await hashPin(pin, state.salt); save(); toast('PIN updated');
+  });
+  document.querySelectorAll('[data-remove]').forEach(b => b.onclick = () => {
+    const s = state.students.find(x => x.id === b.dataset.remove);
+    if (!confirm(`Remove ${s.name}? Their history stays in the ledger.`)) return;
+    state.students = state.students.filter(x => x !== s); save(); render();
+  });
+
+  on('#selAll', 'onclick', () => document.querySelectorAll('#award [name=s]').forEach(c => c.checked = true));
+  on('#selNone', 'onclick', () => document.querySelectorAll('#award [name=s]').forEach(c => c.checked = false));
+  on('#award', 'onsubmit', async ev => {
+    ev.preventDefault();
+    const f = new FormData(ev.target), mode = ev.submitter?.value || 'award';
+    const amount = parseInt(f.get('amount'), 10), memo = f.get('memo').trim(), wallets = f.getAll('s');
+    if (!wallets.length) return toast('Pick at least one student');
+    for (const w of wallets) {
+      if (mode === 'award') await addTx('award', BANK, w, amount, memo);
+      else { const amt = Math.min(amount, Math.max(0, balanceOf(w))); if (amt) await addTx('deduct', w, BANK, amt, memo); }
+    }
+    toast(`${mode === 'award' ? 'Awarded' : 'Deducted'} ${amount} for ${wallets.length} student(s)`); render();
+  });
+
+  on('#addItem', 'onsubmit', ev => {
+    ev.preventDefault();
+    const f = new FormData(ev.target), stock = f.get('stock');
+    state.items.push({ id: uid(), name: f.get('name').trim(), price: parseInt(f.get('price'), 10), stock: stock === '' ? -1 : parseInt(stock, 10) });
+    save(); render();
+  });
+  document.querySelectorAll('[data-delitem]').forEach(b => b.onclick = () => {
+    state.items = state.items.filter(i => i.id !== b.dataset.delitem); save(); render();
+  });
+
+  on('#verify', 'onclick', async () => {
+    const bad = await verifyChain();
+    $('#verifyOut').textContent = bad < 0 ? `✓ All ${state.ledger.length} entries check out.` : `✗ Entry #${bad} has been altered.`;
+  });
+
+  on('#settings', 'onsubmit', ev => {
+    ev.preventDefault();
+    const f = new FormData(ev.target), limit = parseInt(f.get('limit'), 10) || 0;
+    state.settings.allowTransfers = !!f.get('allowTransfers');
+    state.settings.defaultWeeklyLimit = limit;
+    if (f.get('applyAll')) state.students.forEach(s => s.weeklyLimit = limit);
+    save(); toast('Rules saved');
+  });
+  on('#export', 'onclick', () => {
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([JSON.stringify(state, null, 2)], { type: 'application/json' }));
+    a.download = `creed-backup-${new Date().toISOString().slice(0, 10)}.json`; a.click();
+  });
+  on('#restore', 'onchange', restoreFromFile);
+  on('#wipe', 'onclick', () => {
+    if (prompt('Type ERASE to delete every wallet and transaction on this device') !== 'ERASE') return;
+    localStorage.removeItem(STORE_KEY); state = null; session = null; render();
+  });
+}
+
+async function restoreFromFile(ev) {
+  const file = ev.target.files[0]; if (!file) return;
+  try {
+    const data = JSON.parse(await file.text());
+    if (!data || !Array.isArray(data.ledger) || !Array.isArray(data.students)) throw 0;
+    if (state && !confirm('Replace the current classroom with this backup?')) return;
+    state = data; save(); session = null;
+    const bad = await verifyChain();
+    toast(bad < 0 ? 'Backup restored' : `Restored, but ledger entry #${bad} looks altered`);
+    render();
+  } catch { toast('That file is not a CREED backup'); }
+}
+
+// ---------- student ----------
+const getStudent = () => state.students.find(s => s.id === session.id);
+
+function renderStudent() {
+  const me = getStudent();
+  if (!me) { session = null; return render(); }
+  const list = [['wallet', 'My Wallet'], ['store', 'Class Store'], ['goals', 'Savings Goals']];
+  if (state.settings.allowTransfers) list.push(['send', 'Send']);
+  const body = { wallet: studentWallet, store: studentStore, goals: studentGoals, send: studentSend }[tab] || studentWallet;
+  $('#app').innerHTML = tabs(list) + body(me);
+  wireTabs();
+  wireStudent(me);
+}
+
+function budgetCard(me) {
+  if (!me.weeklyLimit) return '';
+  const spent = spentThisWeek(me.walletId), pct = Math.min(100, Math.round(spent / me.weeklyLimit * 100));
+  return `<div class="card"><h2>This week's spending</h2>
+    <div class="bar ${spent > me.weeklyLimit ? 'over' : ''}"><div style="width:${pct}%"></div></div>
+    <p class="muted">${spent} of ${me.weeklyLimit} spent · ${Math.max(0, me.weeklyLimit - spent)} left until Monday</p></div>`;
+}
+
+function studentWallet(me) {
+  const mine = state.ledger.filter(e => e.from === me.walletId || e.to === me.walletId);
+  const earned = mine.filter(e => e.to === me.walletId).reduce((s, e) => s + e.amount, 0);
+  const spent = mine.filter(e => e.from === me.walletId).reduce((s, e) => s + e.amount, 0);
+  return `
+  <div class="card"><div class="muted">Balance</div><div class="balance">${fmt(balanceOf(me.walletId))}</div>
+    <div class="mono muted">Wallet address: ${me.walletId}</div>
+    <p class="muted">Earned ${earned} · Spent or sent ${spent}</p></div>
+  ${budgetCard(me)}
+  <div class="card"><h2>My history</h2>${historyTable(mine, me.walletId)}</div>`;
+}
+
+function studentStore(me) {
+  const bal = balanceOf(me.walletId), left = me.weeklyLimit ? me.weeklyLimit - spentThisWeek(me.walletId) : Infinity;
+  const cards = state.items.map(i => {
+    const out = i.stock === 0, short = bal < i.price, overBudget = i.price > left;
+    const note = out ? 'Sold out' : short ? `Need ${i.price - bal} more` : overBudget ? 'Over your weekly limit' : '';
+    return `<div class="card" style="margin:0"><strong>${esc(i.name)}</strong><div>${fmt(i.price)}</div>
+      <div class="muted">${i.stock < 0 ? 'Unlimited' : `${i.stock} left`}</div>
+      <div class="row" style="margin-top:8px"><button class="primary" data-buy="${i.id}" ${out || short || overBudget ? 'disabled' : ''}>Buy</button>
+      <span class="muted">${note}</span></div></div>`;
+  }).join('');
+  return `<div class="card"><h2>Class Store</h2><p class="muted">You have ${fmt(bal)}.</p>
+    <div class="grid">${cards || '<p class="muted">Nothing for sale yet.</p>'}</div></div>`;
+}
+
+function studentGoals(me) {
+  const bal = balanceOf(me.walletId);
+  const rows = me.goals.map(g => {
+    const pct = Math.min(100, Math.round(bal / g.target * 100));
+    return `<div style="margin-bottom:12px"><div class="row" style="justify-content:space-between"><strong>${esc(g.name)}</strong>
+      <span class="muted">${Math.min(bal, g.target)} / ${g.target}</span></div>
+      <div class="bar"><div style="width:${pct}%"></div></div>
+      <div class="row" style="justify-content:space-between"><span class="muted">${bal >= g.target ? 'You can afford this!' : `${g.target - bal} to go`}</span>
+      <button class="danger" data-delgoal="${g.id}">Remove</button></div></div>`;
+  }).join('');
+  const opts = state.items.map(i => `<option value="${i.id}">${esc(i.name)} (${i.price})</option>`).join('');
+  return `
+  <div class="card"><h2>Savings goals</h2>${rows || '<p class="muted">Set a goal to plan what you are saving for.</p>'}</div>
+  <div class="card"><h2>New goal</h2>
+    <form id="addGoal" class="grid">
+      ${opts ? `<div><label>Save for a reward</label><select name="item"><option value="">Choose…</option>${opts}</select></div>` : ''}
+      <div><label>Or name your own goal</label><input name="name" placeholder="Something special"></div>
+      <div><label>Target amount</label><input name="target" type="number" min="1" step="1"></div>
+      <div style="align-self:end"><button class="primary">Add goal</button></div>
+    </form></div>`;
+}
+
+function studentSend(me) {
+  const opts = state.students.filter(s => s.id !== me.id).sort((a, b) => a.name.localeCompare(b.name))
+    .map(s => `<option value="${s.walletId}">${esc(s.name)}</option>`).join('');
+  return `<div class="card"><h2>Send ${esc(state.settings.unit)} to a classmate</h2>
+    <form id="send">
+      <label>To</label><select name="to" required>${opts}</select>
+      <label>Amount</label><input name="amount" type="number" min="1" step="1" required>
+      <label>Note</label><input name="memo" placeholder="Thanks for the help!">
+      <div class="row" style="margin-top:12px"><button class="primary">Send</button></div>
+    </form></div>`;
+}
+
+function wireStudent(me) {
+  document.querySelectorAll('[data-buy]').forEach(b => b.onclick = async () => {
+    const item = state.items.find(i => i.id === b.dataset.buy);
+    if (!confirm(`Buy "${item.name}" for ${fmt(item.price)}?`)) return;
+    if (balanceOf(me.walletId) < item.price || item.stock === 0) return toast('Not possible right now');
+    if (item.stock > 0) item.stock--;
+    await addTx('purchase', me.walletId, STORE, item.price, item.name);
+    toast(`Bought ${item.name}! Show your teacher.`); render();
+  });
+  const addGoal = $('#addGoal');
+  if (addGoal) addGoal.onsubmit = ev => {
+    ev.preventDefault();
+    const f = new FormData(ev.target), item = state.items.find(i => i.id === f.get('item'));
+    const name = item ? item.name : (f.get('name') || '').trim(), target = item ? item.price : parseInt(f.get('target'), 10);
+    if (!name || !(target > 0)) return toast('Pick a reward, or enter a name and target');
+    me.goals.push({ id: uid(), name, target }); save(); render();
+  };
+  document.querySelectorAll('[data-delgoal]').forEach(b => b.onclick = () => {
+    me.goals = me.goals.filter(g => g.id !== b.dataset.delgoal); save(); render();
+  });
+  const send = $('#send');
+  if (send) send.onsubmit = async ev => {
+    ev.preventDefault();
+    const f = new FormData(ev.target), amount = parseInt(f.get('amount'), 10), to = f.get('to');
+    if (!to) return toast('No classmates to send to yet');
+    if (amount > balanceOf(me.walletId)) return toast('Not enough in your wallet');
+    if (me.weeklyLimit && amount > me.weeklyLimit - spentThisWeek(me.walletId)) return toast('That is over your weekly limit');
+    await addTx('transfer', me.walletId, to, amount, f.get('memo').trim());
+    toast(`Sent ${amount} to ${walletLabel(to)}`); tab = 'wallet'; render();
+  };
+}
+
+$('#logout').onclick = () => { session = null; render(); };
+load();
+render();
+</script>
+</body>
+</html>
